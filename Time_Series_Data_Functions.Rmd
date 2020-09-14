@@ -1,0 +1,810 @@
+---
+title: "Time Series Analysis functions "
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+library("expm")
+library("vars")
+library(kableExtra)
+library(MASS) # simulate multivariate normal
+library(ggplot2)
+```
+
+Downloading prevously written Time Series functions
+
+```{r,echo = FALSE}
+Hypothesis_test_chistat <- function(Y_mat,p, U ,u){
+ 
+  
+  OLS_fit <- fit_VAR(Y_mat, p)
+  
+  
+  Beta_hat <- t(cbind(OLS_fit$nu, do.call(cbind, OLS_fit$coef_list))) 
+ 
+  Beta <- as.vector(Beta_hat)
+  
+
+  UB <- U %*% Beta
+
+   
+  k <- ncol(Y_mat)
+  n <- nrow(Y_mat)
+  
+  X <- matrix(NA, nrow=n-p, ncol=k*p) 
+  X <- t(sapply(1:(n - p), function(i) {
+    c(t(Y_mat[(n - i):(n - i + 1 - p ), ]))
+    }))
+  X <- cbind(1, X)
+  
+   
+  gamma <- (t(X) %*% X)/(n-p)
+  inv_gamma <- solve(gamma)
+  
+  sigma <- OLS_fit$Sigma
+  
+  centering_mat <- solve(U %*% (sigma %x% inv_gamma) %*% t(U))
+  chi_stat <- (t(UB - u)) %*% centering_mat %*% (UB - u)
+  chi_stat <- (n-p) * chi_stat
+  
+  
+  
+  
+  return(chi_stat)
+  
+}
+
+compute_MA_representation <- function(nu, coef_list, I=25) {
+  K <- nrow(coef_list[[1]])
+  p <- length(coef_list)
+  MA_coef_list <- list(diag(K))
+  for (i in 1:I) {
+    Phi <- matrix(0, nrow=K, ncol=K)
+    for (j in 1:min(i, p)) {
+      Phi <- Phi + coef_list[[j]] %*% MA_coef_list[[i - j + 1]] 
+    }
+    MA_coef_list[[i + 1]] <- Phi
+  }
+  list(
+    mu=solve(diag(K) - Reduce('+', coef_list), nu),
+    MA_coef_list=MA_coef_list
+    )
+}
+
+
+
+
+fit_VAR <- function(y, p=1) {
+  # Return least-squares estimate for coefficient matrices.
+  #
+  # Input(s):
+  # - y: an n x K matrix of data
+  # - p: the VAR order
+  # 
+  # Returns:
+  # - nu: the estimated intercept vector of length K
+  # - coef_list: the list of estimated coefficient matrices
+  # - Sigma: the estimated error covariance matrix
+  
+  K <- ncol(y)
+  n <- nrow(y)
+  if(p>0){
+  X <- matrix(NA, nrow=n-p, ncol=K*p) 
+  X <- t(sapply(1:(n - p), function(i) {
+    c(t(y[(n - i):(n - i + 1 - p ), ]))
+    }))
+  X <- cbind(1, X)
+
+  nu <- rep(NA, K)
+  coef_list <- lapply(1:p, function(j) {
+    matrix(NA, nrow=K, ncol=K)
+  })
+  residual_matrix <- matrix(NA, nrow=(n - p), ncol=K)
+  for (k in 1:K) {
+    y_response <- y[n:(p + 1), k]
+    coef <- solve(crossprod(X, X), crossprod(X, y_response))
+    nu[k] <- coef[1, 1]
+    for (p1 in 1:p) {
+      coef_list[[p1]][k, ] <- coef[((p1-1) * K + 1):(p1 * K) + 1]
+    }
+    residual_matrix[, k] <- y_response - X %*% coef
+  }
+  }else{
+    coef_list <- lapply(1:p, function(j) {
+    matrix(NA, nrow=K, ncol=K)
+  })
+    X <- matrix(1, nrow =n-p, ncol = 1)
+    nu <- rep(NA, K)
+    residual_matrix <- matrix(NA, nrow=(n - p), ncol=K)
+     for (k in 1:K) {
+      y_response <- y[n:(p + 1), k]
+      coef <- solve(crossprod(X, X), crossprod(X, y_response))
+      nu[k] <- coef[1, 1]
+      residual_matrix[, k] <- y_response - X %*% coef
+    }
+  }
+  
+  Sigma <- crossprod(residual_matrix, residual_matrix) / (n - K * p - 1)
+  list(nu=nu, coef_list=coef_list, Sigma=Sigma)
+}
+
+forecast_VAR <- function(nu, coef_list, Sigma, y, m) {
+  # Compute the forecast from a given VAR model and past data.
+  # 
+  # Input(s):
+  # - nu: intercept
+  # - coef_list: a list of coefficient matrices
+  # - Sigma: the covariance matrix of white noise
+  # - y: a n x K matrix of data
+  # - m: forecast horizon
+  #
+  # Return(s):
+  # - y_pred: a m x K matrix of forecasts
+  # - MSE_list: a list of length m, each of the items
+  # is a K x K MSE matrix
+  
+  n <- nrow(y)
+  p <- length(coef_list)
+  MA_coef_list <- compute_MA_representation(nu=nu, 
+                                            coef_list=coef_list, 
+                                            I=m)$MA_coef_list
+  MSE_list <- list(Sigma)
+  for (i in 1:m) {
+    y_next <- nu
+    for (j in 1:p) {
+      y_next <- y_next + coef_list[[j]] %*% y[n + i - j, ]
+    }
+    y <- rbind(y, c(y_next))
+    if (i > 1) {
+       MSE_list[[i]] <- MSE_list[[i - 1]] + MA_coef_list[[i]] %*% Sigma %*% t(MA_coef_list[[i]])
+    }
+  }
+  list(y_pred=y[(n + 1):(n + m), ],
+       MSE_list=MSE_list)
+}
+
+Omega_matrix <- function(Y_mat,p,m){
+  
+  OLS_fit <- fit_VAR(Y_mat,p)
+  
+  n <- nrow(Y_mat)
+  k <- ncol(Y_mat)
+
+
+  X <- matrix(NA, nrow=n-p, ncol=k*p) 
+  X <- t(sapply(1:(n - p), function(i) {
+    c(t(Y_mat[(n - i):(n - i + 1 - p ), ]))
+    }))
+  X <- cbind(1, X)
+  
+ 
+
+  MA <- compute_MA_representation(nu = OLS_fit$nu, coef_list = OLS_fit$coef_list, I = m)
+  PHI <- MA$MA_coef_list
+  
+  gamma <- (t(X) %*% X)/n
+  inv_gamma <- solve(gamma)
+  
+  C <- matrix(0, (k*p+1), (k*p+1))
+  C[1,1] <- 1
+  C[2:(k+1),1] <- OLS_fit$nu
+  
+for(i in 1:p){
+
+  C[(2:(k+1)),(2+(i-1)*k):(1+(i*k))] <- OLS_fit$coef_list[[i]]
+} 
+
+if((p-1)>0){
+  
+  C[((k+2):((p*k)+1)), (2:(k*(p-1)+1))] = diag(k*(p-1))
+}
+  
+Omega <- list()
+for(h in 1:(m)){
+  Omega[[h]] <- matrix(0,k,k)  
+  for(i in 1:(h)){
+    for(j in 1:(h)){
+    Omega[[h]] <- Omega[[h]] + sum(diag(((t(C))%^%(h - i)) %*% inv_gamma %*% (C%^%(h - j)) %*% gamma )) * PHI[[i]] %*% OLS_fit[[3]] %*% t(PHI[[j]])
+      
+    }
+  }
+  Omega[[h]] <- Omega[[h]]/n
+}
+
+
+
+list(Omega=Omega)
+}
+
+```
+
+
+## 1 
+This function takes in a nxk matrix of observations y, a specified VAR(p) order and how many bootstrap samples N (should be large). It will then return a matrix of standard deviations for each element of your sample white noise covariance matrix 
+
+```{r}
+
+bootstrap_error <- function(y, p=1, N){
+  
+  
+  n <- nrow(y)
+  n_fit <- n - p
+  k <- ncol(y)
+  y_est <- matrix(0,ncol = k, nrow = n_fit)
+  
+  VAR <- fit_VAR(y,p)
+  Sigma_hat<- VAR$Sigma
+  error <- matrix(0,ncol= k,nrow = n_fit)
+  
+  for( i in 1:n_fit){
+    
+  y_pre <- y[i:(i+p-1),]
+  
+  y_est[i,] <-  forecast_VAR(VAR$nu,VAR$coef_list,Sigma_hat,y_pre,1)$y_pred
+  
+  error[i,] <- y[i+p,] - y_est[i,]
+     
+  }
+ 
+  
+  range <- 1:n_fit
+  Sigma <- list()
+  residual <- list()
+ 
+  for(j in 1:N){ 
+    y_pre <- y[1:p,]
+    index <- sample(range,n_fit, replace = TRUE)
+    sample_error <- error[index,]
+    y_hat <- matrix(0, nrow=n_fit, ncol = k)
+    
+    for(i in 1:n_fit){
+      
+      y_est[i,] <-  forecast_VAR(VAR$nu,VAR$coef_list,Sigma_hat,y_pre,1)$y_pred
+      y_hat[i,] <- y_est[i,] + sample_error[i,]
+      y_pre <- rbind(y_pre[2:p,],y_hat[i,])
+      
+    }
+    y_pre <- y[1:p,]
+    y_sample <- rbind(y_pre,y_hat)
+    
+    VAR_sample <- fit_VAR(y_sample,p)
+    
+    Sigma[[j]] <- VAR_sample$Sigma
+    
+    residual[[j]] <- Sigma_hat - VAR_sample$Sigma
+ }
+  
+  st_error <- matrix(0,k,k)
+  for(i in 1:k){
+    for(j in 1:k){
+      
+       component_residuals<- sapply(residual,function(x) x[i,j])
+      component_residuals_stdev <- sd(component_residuals)
+      st_error[i,j] <-  component_residuals_stdev
+    }
+  }
+
+return(st_error)      
+}
+
+```
+
+
+##  2
+
+
+```{r}
+
+bootstrap_hypothesis_test <- function(y, p=1, N, U, u){
+  
+  
+  n <- nrow(y)
+  n_fit <- n - p
+  k <- ncol(y)
+  y_est <- matrix(0,ncol = k, nrow = n_fit)
+
+  VAR <- fit_VAR(y,p)
+  Sigma_hat<- VAR$Sigma
+  
+  error <- matrix(0,ncol= k,nrow = n_fit)
+  
+  #create error matrix
+ for( i in 1:n_fit){
+    
+  y_pre <- y[i:(i+p-1),]
+  
+  y_est[i,] <-  forecast_VAR(VAR$nu,VAR$coef_list,Sigma_hat,y_pre,1)$y_pred
+  
+  error[i,] <- y[i+p,] - y_est[i,]
+     
+  }
+ 
+  chi_stat <- Hypothesis_test_chistat(y,p,U,u)
+  
+  #need to create UB for the hypothesis of the bootstrap
+  
+  OLS_fit <- fit_VAR(Y_mat, p)
+  Beta_hat <- t(cbind(OLS_fit$nu, do.call(cbind, OLS_fit$coef_list))) 
+  Beta <- as.vector(Beta_hat)
+  UB <- U %*% Beta
+  
+  y_pre <- y[(n_fit+1):n,]
+  range <- 1:n_fit
+  y_pre <- y[1:p,]
+  counter <- 0
+  
+ for(j in 1:N){ 
+ 
+   index <- sample(range,n_fit, replace = TRUE)
+    sample_error <- error[index,]
+    y_hat <- matrix(0, nrow=n_fit, ncol = k)
+    
+    for(i in 1:n_fit){
+      y_est[i,] <-  forecast_VAR(VAR$nu,VAR$coef_list,Sigma_hat,y_pre,1)$y_pred
+      y_hat[i,] <- y_est[i,] + sample_error[i,]
+      y_pre <- rbind(y_pre[2:p,],y_hat[i,])
+      
+    }
+    
+    y_pre <- y[1:p,]
+    y_sample <- rbind(y_pre,y_hat)
+    
+    chi_stat_sample <- Hypothesis_test_chistat(y_sample,p,U,UB)
+  
+    if(chi_stat < chi_stat_sample){
+      counter <- counter + 1
+    }
+   
+ }
+
+  pvalue <- (1+ counter)/(N + 1)  
+
+return(pvalue)          
+}
+
+```
+
+
+#Running code on economic data
+
+```{r}
+#loading in e1 data
+
+data = log(read.table("e1.dat.txt", skip = 6, header = T))
+
+
+Y_1_differenced <- diff(data[,1])
+Y_2_differenced <- diff(data[,2])
+Y_3_differenced <- diff(data[,3])
+
+
+#reversing the list to make sure it is in the proper chronolgical order for my OLS function
+
+Y_1_differenced_df <- data.frame(Y_1_differenced, nrow = length(Y_1_differenced), ncol = 1)
+Y_2_differenced_df <- data.frame(Y_2_differenced, nrow = length(Y_2_differenced), ncol = 1)
+Y_3_differenced_df <- data.frame(Y_3_differenced, nrow = length(Y_3_differenced), ncol = 1)
+
+
+#creating matrix
+Y_mat <- cbind(Y_1_differenced_df[,1],Y_2_differenced_df[,1],Y_3_differenced_df[,1])
+Y_mat <- Y_mat[-(76:91),]
+
+```
+
+
+Testing my function from  #1
+```{r}
+
+test <- bootstrap_error(Y_mat,2,10000)
+test
+  
+```
+
+
+## Conduct test
+
+```{r}
+k  <- ncol(Y_mat)
+p <- 2
+
+
+U <- matrix(0,9,k*(p*k + 1))
+U[1,5] <- 1;U[2,6] <- 1;U[3,7] <- 1;
+U[4,12] <- 1;U[5,13] <- 1;U[6,14] <- 1;
+U[7,19] <- 1;U[8,20] <- 1;U[9,21] <- 1;
+
+
+
+u <- rep(0,nrow(U))
+  
+bootstrap_hypothesis_test(Y_mat,p = 2, 1000,U = U,u = u)
+```
+
+
+```{r}
+k  <- ncol(Y_mat)
+p <- 3
+
+
+U <- matrix(0,9,k*(p*k + 1))
+U[1,8] <- 1;U[2,9] <- 1;U[3,10] <- 1;
+U[4,18] <- 1;U[5,19] <- 1;U[6,20] <- 1;
+U[7,28] <- 1;U[8,29] <- 1;U[9,30] <- 1;
+
+
+u <- rep(0,nrow(U))
+
+
+
+bootstrap_hypothesis_test(Y_mat,p = 3, 1000,U = U,u = u)
+```
+
+When comparing my above bootstrap results with the Rmarkdown from the last HW assignment, my pvalues seem to be relatively close. My pvalue from HW 3 when testing in $A_{2} = 0$ was .008, and my boostrap value is approximatley .003, so only .005% different.  In both cases I would reject he null at the 5% level. I received similar results when testing $A_{3} = 0$, I recieved a pvalue of .49 on HW3, while i recieved a pvalue of .87 using the bootstrap method.  Both methods fail to reject at the 5% level, however my bootstrap pvalue is significantly larger than HW 3. 
+
+
+
+##  4
+
+The below function takes in an nxk matrix of data (y) and a value M. The function will then check the FPE,AIC,BIC and HQ scores for the VAR(p) model, for p = 0,1,..,M.  It will then return a dataframe with the resulting model scores as well as the model which maximizes the score across each scoring criterion. 
+ 
+```{r}
+
+model_selection <- function(y,M){
+  
+ 
+  k <- ncol(y)
+  
+  FPE_calc <- function(n,p,k,sigma){
+    result <- ((n+p*k+1)/(n-p*k-1))^k * det(sigma)
+    return(result)
+  }
+  AIC_calc <- function(n,p,k,sigma){
+    result <- log(det(sigma)) + (2*k^2*p)/n
+    return(result)
+  }
+  BIC_calc <- function(n,p,k,sigma){
+    result <- log(det(sigma)) + ((log(n)*(k^2)*p))/n
+  return(result)
+    }
+  
+  HQ_calc <- function(n,p,k,sigma){
+    result <- log(det(sigma)) + 2*((log(log(n))*k^2*p))/n
+    return(result)
+  }
+  
+  FPE <-rep(0,M+1)
+  AIC <- rep(0,M+1)
+  BIC <- rep(0,M+1)
+  HQ <- rep(0,M+1)
+    
+  for(i in 1:(M+1)){
+    
+    p <- (i - 1)
+    n <- nrow(y) - M
+    yy <- y[-(1:M),]
+    OLS_fit <- fit_VAR(yy,p)
+    Sigma <-OLS_fit$Sigma
+    Sigma_uncertain <- Sigma 
+    Sigma_ML <-  (n-k*p -1)/n * Sigma_uncertain
+      
+    
+    FPE[i] <- FPE_calc(n,p,k,Sigma_ML)
+    AIC[i] <- AIC_calc(n,p,k,Sigma_ML)
+    BIC[i] <- BIC_calc(n,p,k,Sigma_ML)
+    HQ[i] <- HQ_calc(n,p,k,Sigma_ML)
+    } 
+ 
+  Results <- data.frame(cbind(FPE,AIC,BIC,HQ))
+  
+  min.row.FPE  <- (which(Results$FPE==min(Results$FPE))) 
+  min.row.AIC  <- (which(Results$AIC==min(Results$AIC))) 
+  min.row.BIC  <- (which(Results$BIC==min(Results$BIC))) 
+  min.row.HQ   <- (which(Results$HQ==min(Results$HQ))) 
+
+  cat('The model choice p, for the FPE criteria is :', min.row.FPE-1,'\n')
+  cat('The model choice p, for the AIC criteria is :', min.row.AIC-1,'\n')
+  cat('The model choice p, for the BIC criteria is :', min.row.BIC-1,'\n')
+  cat('The model choice p, for the HQ criteria is :', min.row.HQ-1,'\n')
+  return(Results)
+  
+}
+
+
+```
+
+
+```{r}
+model_selection(Y_mat,4)
+
+```
+
+## 5
+The below function takes in a fitted var model along with he n previous datapoints y.  It will then compute the sample cross covariance matrix for a specified H lag time periods.  It will also show the approximate 95% confidence level (approximated by $2/\sqrt(n)$).
+
+```{r}
+
+cross_corr <- function(y,nu,coef_list, Sigma,H=20){
+  
+  p <- length(coef_list)
+  n <- nrow(y)
+  n_fit <- n - p
+  k <- ncol(y)
+  yy <- y[-(1:p),]
+  
+  error <- matrix(0,ncol= k, nrow = n_fit)
+  
+  #create error matrix
+  y_pre <- y[1:p,] 
+  for( i in 1:n_fit){
+    
+  y_est <- nu
+    for(j in 1:p){
+     y_est <- y_est + coef_list[[j]] %*% y_pre[(p+1-j),]  
+    }
+  error[i,] <- yy[i,] - y_est
+  if(p >1){
+  y_pre <- rbind(y_pre[2:p,],t(y_est))
+ 
+  }else{
+    y_pre <- y_est
+  }
+  }
+
+
+  
+  C <- list()
+  for (i in 1:(H+1)){
+    C[[i]] <- matrix(0,nrow = k, ncol = k)
+    for(j in i:n_fit){
+      
+      C[[i]] <- C[[i]] + error[j,] %*% t(error[(j-i+1),])
+      
+    }
+    C[[i]] <- C[[i]] / n_fit
+  }
+
+D <- diag(sqrt(diag(C[[1]])))  
+D_inv <- solve(D)
+
+
+ccm_list <- lapply(C, function(cov_mat) {
+    D_inv %*% (cov_mat %*% D_inv)
+})
+
+
+
+confidence_level <- rep(2/sqrt(n_fit),H)  
+
+ccm_list <- ccm_list[-1]
+list(ccm_list=ccm_list,confidence_level=confidence_level)
+
+}
+
+plot_ccm <- function(ccm_list,confidence_level, i=1, j=1, ylim=c(-1, 1), H=20) {
+  H <- min(length(ccm_list) - 1, H)
+  ccm_values <- sapply(ccm_list, function(ccm) ccm[i, j])
+  
+  plot(0:H, ccm_values, type='h', ylim=ylim,lwd = 10,lend = 1,
+       main=sprintf('Cross-correlation (%d, %d)', i, j),
+       xlab='lag',
+       ylab='cross-correlation')
+  abline(h=0)
+  lines(0:H,confidence_level, lty = 2 )
+  lines(0:H,-confidence_level, lty = 2 )
+}
+
+
+```
+
+```{r}
+OLS_fit <- fit_VAR(Y_mat,2)
+
+cc_mat <- cross_corr(Y_mat,OLS_fit$nu, OLS_fit$coef_list,OLS_fit$Sigma,H = 20)
+
+
+plot_ccm(cc_mat$ccm_list,cc_mat$confidence_level,1,1)
+plot_ccm(cc_mat$ccm_list,cc_mat$confidence_level,3,2)
+plot_ccm(cc_mat$ccm_list,cc_mat$confidence_level,3,3)
+
+
+```
+
+
+##  6
+
+This function computes both the Port test for white noise lag covariance as well as the Ljung-Box alternative test (QH_stat_2 and pval2)
+
+```{r}
+P_test <- function(y,nu,coef_list, Sigma,H=20){
+  
+  p <- length(coef_list)
+  n <- nrow(y)
+  n_fit <- n - p
+  k <- ncol(y)
+  yy <- y[-(1:p),]
+  
+  error <- matrix(0,ncol= k, nrow = n_fit)
+  
+  #create error matrix
+  y_pre <- y[1:p,] 
+  for( i in 1:n_fit){
+    
+  #y_pre <- y[i:(p+i-1),] 
+  y_est <- nu
+    for(j in 1:p){
+     y_est <- y_est + coef_list[[j]] %*% y_pre[(p+1-j),]  
+    }
+  error[i,] <- yy[i,] - y_est
+  if(p >1){
+  y_pre <- rbind(y_pre[2:p,],t(y_est))
+ 
+  }else{
+    y_pre <- y_est
+  }
+  }
+
+  C <- list()
+  for (i in 1:(H+1)){
+    C[[i]] <- matrix(0,nrow = k, ncol = k)
+    for(j in i:n_fit){
+      
+      C[[i]] <- C[[i]] + error[j,] %*% t(error[(j-i+1),])
+      
+    }
+    C[[i]] <- C[[i]] / n_fit
+  }
+  
+  
+  Q_H <- 0
+ C_0_inv <- solve(C[[1]])
+  for (i in 2:(H+1)){
+    
+    temp <- t(C[[i]]) %*% C_0_inv %*% C[[i]] %*% C_0_inv
+    
+    Q_H <- Q_H + sum(diag(temp))
+    
+    
+  }
+  Q_H <- n_fit*Q_H
+  
+  Q_H_2 <- 0 
+   
+  for (i in 2:(H+1)){
+    
+    temp <- t(C[[i]]) %*% C_0_inv %*% C[[i]] %*% C_0_inv
+    
+    Q_H_2 <- Q_H_2 + sum(diag(temp)) * 1/(n_fit-(i-1))
+    
+    
+  }
+ Q_H_2 <- n_fit^2*Q_H_2
+ 
+
+ pval <- pchisq(Q_H,(k^2*(H-p)))
+ pval2 <- pchisq(Q_H_2,(k^2*(H-p)))
+ 
+ list(pval = 1-pval, QH_stat = Q_H,pval2 = 1-pval2, QH_stat2 = Q_H_2)
+
+}
+
+
+```
+
+```{r}
+
+OLS_fit <- fit_VAR(Y_mat,2)
+
+results <- P_test(Y_mat,OLS_fit$nu, OLS_fit$coef_list,OLS_fit$Sigma,H = 20)
+results$pval
+results$QH_stat
+results$pval2
+results$QH_stat2
+
+```
+
+
+## 7
+
+This function takes in and nxk matix error matrix and a specified order p, and will compute the Jarque-Bera normality test statistic and return its p-value.
+
+
+```{r}
+Jarque_Bera <- function(y,p){
+
+  
+n <- nrow(y)- p
+k <- ncol(y)
+
+coef_list <- fit_VAR(y,p)$coef_list
+nu <- fit_VAR(y,p)$nu
+
+S <- matrix(0,nrow = k, ncol = k)
+
+error <- matrix(0,ncol= k, nrow = n)
+y_sample <- y[-(1:p),]
+
+  #create error matrix
+  y_pre <- y[1:p,] 
+  for( i in 1:n){
+    
+  y_est <- nu
+    for(j in 1:p){
+     y_est <- y_est + coef_list[[j]] %*% y_pre[(p+1-j),]  
+    }
+  error[i,] <- y_sample[i,] - y_est
+  if(p >1){
+  y_pre <- rbind(y_pre[2:p,],t(y_est))
+ 
+  }else{
+    y_pre <- y_est
+  }
+  }
+
+
+Z_bar <- colMeans(error)
+
+yy <- t(error) - Z_bar
+
+yy <- t(yy)
+for(i in 1:n){
+  
+  S <- S + yy[i,] %*% t(yy[i,])
+}
+
+S <- S/(n-1)
+
+P <- t(chol(S))
+
+P_inv <- solve(P)
+
+v <- matrix(0,nrow = n, ncol = k)
+
+for(i in 1:n){
+  
+  v[i,] <- P_inv %*% yy[i,] 
+}
+
+b1 <- rep(0,k)
+b2 <- rep(0,k)
+
+for(i in 1:k){
+  
+  for(j in 1:n){
+    b1[i] <- b1[i] + v[j,i]^3
+    b2[i] <- b2[i] + v[j,i]^4
+  }
+  
+}
+
+b1 <- b1/n
+b2 <- b2/n
+
+
+
+
+centering_mat1 <- diag(1/6,k,k)
+centering_mat2 <- matrix(0,k,k)
+centering_mat3 <- diag(1/24,k,k)
+
+centering_mat <- rbind(cbind(centering_mat1,centering_mat2),cbind(centering_mat2,centering_mat3))
+
+
+
+stat <- cbind(t(b1), t(b2 - rep(3,k)))%*% centering_mat %*% t( cbind(t(b1), t(b2 - rep(3,k))))
+
+stat <- n*stat
+
+chi_stat <- pchisq(stat[1,1],df = 2*k)
+return(1-chi_stat)
+}
+
+
+```
+
+```{r}
+
+
+Jarque_Bera(Y_mat,2)
+
+```
+
