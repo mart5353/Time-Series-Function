@@ -1,0 +1,99 @@
+---
+title: "Kalman Filter"
+output: pdf_document
+---
+
+
+```{r}
+
+#Kalman Filter
+#X = exogenous non-stochastic variables, in this case expectation of acceleration 
+Kalman_Filter <- function(Z_est,B_mat,F_mat,sigma_z_est,H, Sigma_W, Sigma_V,G, X = rep(0,n), n =100){
+  for(i in 1:n){
+    
+    # Prediction step
+    Z_temp <- B_mat %*% Z_est[[i]] + F_mat*X[i]
+    sigma_z_temp <- B_mat %*% sigma_z_est %*% t(B_mat) + Sigma_W
+    Y_temp <- H %*% Z_temp + G %*% X[[i]]
+    sigma_y <- H %*% sigma_z_temp %*% t(H) + Sigma_V
+    #correction step
+    #correction matrix/Kalman Gain
+    P= sigma_z_temp %*% t(H) %*% solve(sigma_y)
+    
+    Z_est[[i+1]] <- Z_temp + P %*% (Y[[i+1]] - Y_temp)
+    sigma_z_est <- sigma_z_temp - P %*% sigma_y %*% t(P)
+    
+    
+  }
+  list(State_Est = Z_est, Var_Est = sigma_z_est)
+}
+
+
+
+```
+
+To highlifht the benefits of Kalman Filtering we will look at a simple GPS Kalman filter model, where position is on the real line (since Time series Kalman filter is trivial):
+
+```{r}
+library(MASS)
+n <- 200
+#Generating the observed GPS locations, numbers are on the real line
+Y <- list()
+Y_true <- list()
+V <- list()
+Z_est <- list()
+#Setting initial conditions, we will guess that the initial velocity and position are 0
+Z_est[[1]] <- c(0,0)
+sigma_z_est <- matrix(0,2,2)
+Y_true <-list()
+V_true <- list()
+Y_true[[1]] <- 0
+V_true[[1]] <- 0
+#observed Y from GPS
+Y[[1]] <- 0
+
+
+#can be interpreted as slippage or friction, error in the transition equation
+Qw <- matrix(c(.5,.22,.22,.1),2,2,byrow = TRUE)
+#variance of GPS location reading in the measurement equation, essentially the GPS location is accurate to 1 meter 95% of the time
+U <- 3
+
+WN_1 <- mvrnorm(n,mu = c(0,0), Sigma = Qw)
+WN_2 <- rnorm(n,0,U)
+
+
+
+#generating our pseduo obsvered GPS reading at time = 1,...,100
+for(i in 1:n){
+  
+  Y_true[[i+1]] <- Y_true[[i]] + V_true[[i]] +0 + WN_1[i,1]
+  V_true[[i+1]] <- V_true[[i]] + 0   + WN_1[i,2]
+  Y[[i+1]] <- Y_true[[i+1]] + WN_2[i]
+  
+}
+
+#the excpectation of acceleration is a non-stochastic exogenous variable
+a <- rep(.1,n)
+#Transition Matrices
+B_mat <- matrix(c(1,1,0,1),2,2, byrow = TRUE)
+F_mat <-c(.5, 1)
+#Measurement matrix
+H <- t(c(1,0))
+
+
+
+
+GPS_Est <- Kalman_Filter(Z_est, B_mat,F_mat,sigma_z_est,H,Sigma_W = Qw, Sigma_V = U,G = 0, X = a, n =n)
+
+#Comparison
+Coordinate_estimate <- sapply(GPS_Est$State_Est, function(x) x)[1,]
+Coordinate_measure <- sapply(Y, function(x) x)
+Comparison <- cbind(Coordinate_estimate,Coordinate_measure, Coordinate_estimate-Coordinate_measure)
+
+Y_true_vec <- sapply(Y_true, function(x) x)
+
+#Improvment in the variance of our estimator
+sd(Y_true_vec - Coordinate_measure)
+sd(Y_true_vec - Coordinate_estimate)
+```
+
